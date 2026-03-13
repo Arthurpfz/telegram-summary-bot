@@ -1,0 +1,736 @@
+{
+  "name": "Telegram Content Summarizer",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"]
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and normalize message data\nconst message = $input.first().json.message;\nconst text = message.text || '';\nconst userId = message.from.id;\nconst chatId = message.chat.id;\nconst messageId = message.message_id;\nconst username = message.from.username || '';\n\n// Detect content type using regex\nlet contentType = 'invalid';\nlet url = null;\n\nconst youtubeRegex = /(youtube\\.com|youtu\\.be)/i;\nconst urlRegex = /https?:\\/\\/[^\\s]+/i;\n\nif (youtubeRegex.test(text)) {\n  contentType = 'youtube';\n  url = text.match(urlRegex)?.[0];\n} else if (urlRegex.test(text)) {\n  contentType = 'article';\n  url = text.match(urlRegex)?.[0];\n} else if (text.length > 500) {\n  contentType = 'text';\n} else if (text.startsWith('/history')) {\n  contentType = 'history';\n} else if (text.startsWith('/start') || text.startsWith('/help')) {\n  contentType = 'help';\n} else {\n  contentType = 'invalid';\n}\n\nreturn {\n  json: {\n    contentType,\n    url,\n    text,\n    userId,\n    chatId,\n    messageId,\n    username\n  }\n};"
+      },
+      "id": "extract-message",
+      "name": "Extract Message Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "operation": {
+                "type": "string",
+                "operation": "equals",
+                "value": "youtube"
+              },
+              "renameOutput": true,
+              "outputKey": "YouTube"
+            },
+            {
+              "operation": {
+                "type": "string",
+                "operation": "equals",
+                "value": "article"
+              },
+              "renameOutput": true,
+              "outputKey": "Article"
+            },
+            {
+              "operation": {
+                "type": "string",
+                "operation": "equals",
+                "value": "text"
+              },
+              "renameOutput": true,
+              "outputKey": "Text"
+            },
+            {
+              "operation": {
+                "type": "string",
+                "operation": "equals",
+                "value": "history"
+              },
+              "renameOutput": true,
+              "outputKey": "History"
+            },
+            {
+              "operation": {
+                "type": "string",
+                "operation": "equals",
+                "value": "help"
+              },
+              "renameOutput": true,
+              "outputKey": "Help"
+            }
+          ],
+          "fallbackOutput": {
+            "type": "extra",
+            "key": "Invalid"
+          }
+        },
+        "dataPropertyName": "={{$json.contentType}}"
+      },
+      "id": "router-switch",
+      "name": "Route by Content Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.supadata.ai/v1/youtube/transcript",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.url }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SUPADATA_API_KEY"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "supadata-youtube",
+      "name": "Get YouTube Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 100]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://r.jina.ai/{{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "text/markdown"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "jina-reader",
+      "name": "Extract Article (Jina)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 250]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass through text content directly\nconst input = $input.first().json;\n\nreturn {\n  json: {\n    ...input,\n    content: input.text,\n    extractedTitle: 'Direct Text Submission'\n  }\n};"
+      },
+      "id": "text-passthrough",
+      "name": "Text Passthrough",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process YouTube transcript response\nconst input = $input.first().json;\nconst prevData = $('Extract Message Data').first().json;\n\n// Supadata returns transcript as array of segments or plain text\nlet transcript = '';\nif (Array.isArray(input.content)) {\n  transcript = input.content.map(s => s.text).join(' ');\n} else if (typeof input.content === 'string') {\n  transcript = input.content;\n} else if (input.transcript) {\n  transcript = Array.isArray(input.transcript) \n    ? input.transcript.map(s => s.text).join(' ')\n    : input.transcript;\n}\n\n// Truncate if too long (keep under 100k chars for LLM)\nif (transcript.length > 100000) {\n  transcript = transcript.substring(0, 100000) + '\\n\\n[Content truncated due to length]';\n}\n\nreturn {\n  json: {\n    ...prevData,\n    content: transcript,\n    extractedTitle: input.title || 'YouTube Video'\n  }\n};"
+      },
+      "id": "process-youtube",
+      "name": "Process YouTube Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Jina Reader response\nconst input = $input.first();\nconst prevData = $('Extract Message Data').first().json;\n\n// Jina returns markdown content in the body\nlet content = '';\nlet title = 'Article';\n\nif (typeof input.json === 'string') {\n  content = input.json;\n} else if (input.json.data) {\n  content = input.json.data;\n  title = input.json.title || title;\n} else {\n  content = JSON.stringify(input.json);\n}\n\n// Extract title from markdown if present\nconst titleMatch = content.match(/^#\\s+(.+)$/m);\nif (titleMatch) {\n  title = titleMatch[1];\n}\n\n// Truncate if too long\nif (content.length > 50000) {\n  content = content.substring(0, 50000) + '\\n\\n[Content truncated due to length]';\n}\n\nreturn {\n  json: {\n    ...prevData,\n    content,\n    extractedTitle: title\n  }\n};"
+      },
+      "id": "process-article",
+      "name": "Process Article Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 250]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "application": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_TABLE_ID"
+        },
+        "filterByFormula": "=FIND(\"{{ $json.url }}\", {url}) > 0"
+      },
+      "id": "airtable-check-dupe",
+      "name": "Check Duplicate (Airtable)",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [1140, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Airtable"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-duplicate",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-duplicate",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1360, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return cached summary from Airtable\nconst airtableRecord = $input.first().json;\nconst prevData = $('Extract Message Data').first().json;\n\nreturn {\n  json: {\n    ...prevData,\n    summary: airtableRecord.fields.summary,\n    title: airtableRecord.fields.title,\n    cached: true\n  }\n};"
+      },
+      "id": "return-cached",
+      "name": "Return Cached Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_OPENROUTER_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"openai/gpt-4o-mini\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a content summarization assistant. Create clear, structured summaries.\\n\\nAlways use this exact format:\\n\\n**Title**: [Catchy, relevant title]\\n\\n**Overview**: [2-3 sentence executive summary]\\n\\n**Key Points**:\\n1. [First key point]\\n2. [Second key point]\\n(up to 10 points)\\n\\n**Notable Insights**:\\n• [Specific quotes or data]\\n• [Surprising findings]\\n\\nKeep total length under 3500 characters. Be specific and actionable.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Summarize this content:\\n\\n{{ $json.content }}\"\n    }\n  ],\n  \"max_tokens\": 1500\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "openrouter-llm",
+      "name": "Summarize (OpenRouter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1580, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract summary from OpenRouter response\nconst response = $input.first().json;\nconst prevData = $('Is Duplicate?').first().json;\nconst messageData = $('Extract Message Data').first().json;\n\nconst summary = response.choices?.[0]?.message?.content || 'Failed to generate summary';\n\n// Extract title from summary\nconst titleMatch = summary.match(/\\*\\*Title\\*\\*:\\s*(.+)/i);\nconst title = titleMatch ? titleMatch[1].trim() : messageData.extractedTitle || 'Summary';\n\nreturn {\n  json: {\n    ...messageData,\n    summary,\n    title,\n    cached: false,\n    tokenUsage: response.usage?.total_tokens || 0\n  }\n};"
+      },
+      "id": "process-llm-response",
+      "name": "Process LLM Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "application": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_TABLE_ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "url": "={{ $json.url }}",
+            "user_id": "={{ $json.userId }}",
+            "chat_id": "={{ $json.chatId }}",
+            "content_type": "={{ $json.contentType }}",
+            "title": "={{ $json.title }}",
+            "summary": "={{ $json.summary }}",
+            "message_id": "={{ $json.messageId }}"
+          }
+        }
+      },
+      "id": "airtable-save",
+      "name": "Save to Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [2020, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Airtable"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge cached and new summaries for sending\nconst items = $input.all();\nreturn items;"
+      },
+      "id": "merge-summaries",
+      "name": "Merge Summaries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2240, 200]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.summary }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-send-summary",
+      "name": "Send Summary",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2460, 200],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "Welcome to the Content Summarizer Bot!\\n\\nI can summarize:\\n- YouTube videos - Send me a YouTube link\\n- Articles - Send me any article URL  \\n- Long text - Paste text over 500 characters\\n\\nCommands:\\n/help - Show this message\\n/history - View your last 5 summaries\\n\\nJust send me content and I'll create a structured summary!",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-send-help",
+      "name": "Send Help Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [700, 550],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "I didn't understand that. Please send me:\\n\\n- A YouTube link\\n- An article URL\\n- Text over 500 characters\\n\\nOr type /help for more info.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-send-invalid",
+      "name": "Send Invalid Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [700, 700],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "application": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_TABLE_ID"
+        },
+        "filterByFormula": "={user_id} = {{ $json.userId }}",
+        "options": {
+          "sort": [
+            {
+              "field": "created_at",
+              "direction": "desc"
+            }
+          ]
+        },
+        "limit": 5
+      },
+      "id": "airtable-history",
+      "name": "Get History (Airtable)",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [700, 850],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Airtable"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format history for Telegram\nconst records = $input.all();\nconst messageData = $('Extract Message Data').first().json;\n\nif (records.length === 0) {\n  return {\n    json: {\n      chatId: messageData.chatId,\n      historyMessage: \"You don't have any summaries yet. Send me a YouTube link or article to get started!\"\n    }\n  };\n}\n\nlet historyText = '*Your Recent Summaries:*\\n\\n';\n\nrecords.forEach((record, index) => {\n  const fields = record.json.fields || record.json;\n  const title = fields.title || 'Untitled';\n  const type = fields.content_type || 'unknown';\n  const url = fields.url || '';\n  \n  historyText += `${index + 1}. *${title}*\\n`;\n  historyText += `   Type: ${type}\\n`;\n  if (url && !url.startsWith('text_')) {\n    historyText += `   URL: ${url}\\n`;\n  }\n  historyText += '\\n';\n});\n\nreturn {\n  json: {\n    chatId: messageData.chatId,\n    historyMessage: historyText\n  }\n};"
+      },
+      "id": "format-history",
+      "name": "Format History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 850]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.historyMessage }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-send-history",
+      "name": "Send History",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1140, 850],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract Message Data').first().json.chatId }}",
+        "text": "Sorry, I encountered an error processing your request. Please try again.\\n\\nIf the problem persists, the content may not be accessible.",
+        "additionalFields": {}
+      },
+      "id": "error-handler",
+      "name": "Send Error Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1800, 500],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Data": {
+      "main": [
+        [
+          {
+            "node": "Route by Content Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Content Type": {
+      "main": [
+        [
+          {
+            "node": "Get YouTube Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Article (Jina)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Text Passthrough",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get History (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Help Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Invalid Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get YouTube Transcript": {
+      "main": [
+        [
+          {
+            "node": "Process YouTube Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Article (Jina)": {
+      "main": [
+        [
+          {
+            "node": "Process Article Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Text Passthrough": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process YouTube Response": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Article Response": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate (Airtable)": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Return Cached Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summarize (OpenRouter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Cached Summary": {
+      "main": [
+        [
+          {
+            "node": "Merge Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize (OpenRouter)": {
+      "main": [
+        [
+          {
+            "node": "Process LLM Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process LLM Response": {
+      "main": [
+        [
+          {
+            "node": "Save to Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Airtable": {
+      "main": [
+        [
+          {
+            "node": "Merge Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Summaries": {
+      "main": [
+        [
+          {
+            "node": "Send Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get History (Airtable)": {
+      "main": [
+        [
+          {
+            "node": "Format History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format History": {
+      "main": [
+        [
+          {
+            "node": "Send History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateId": "telegram-content-summarizer"
+  },
+  "pinData": {},
+  "versionId": "1",
+  "triggerCount": 0,
+  "tags": [
+    {
+      "name": "telegram",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "ai",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "summarizer",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    }
+  ]
+}
