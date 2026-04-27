@@ -1,4 +1,6 @@
-# Telegram YouTube Summarizer Bot
+# Telegram YouTube Summarizer Bot — ARCHIVED
+
+> **Status: DISABLED 2026-04-19.** Functionality replaced by [XBookmarks](../../XBookmarks/) which now handles YouTube URLs alongside tweets and articles. The n8n workflow `18pdrJhw7kadBACg` is disabled. This directory is kept as historical reference only — do not reactivate.
 
 ## Project Overview
 Telegram bot that takes a YouTube video URL, extracts the transcript, and replies with a detailed summary.
